@@ -1,0 +1,35 @@
+Software Architecture
+
+
+-UI/UX
+     User are classified into two groups from the developers point of view, which the system should distinguish: Clients and Customers
+
+     Clients have exclusive access to all UI functions and they are using the software to perform the software to perform functions for the benefit of their specific enterprise.
+     Customers are on the receiving end of what the customer do. Customer to feel the connected to every enterprise they're link to, i.e design variation- fully automated.
+
+     Customer are able to navigate the system. perform functions like search for businessess/projuct, receive commercial emails for any
+     business they are link to through the software, relevant and relentless marketing outreach. Seek coustomer support through the CRM category where there's an AI bot to handle their minor inconveniencies or link them to the customer support employee of the particular enterprise. Product purchases or services obtain throught the sales development category, after searching a product, customer can view that product from the enterprise    specific UI- we are doing design variation . Database for customers, customer informations and algorithms.
+
+     Clients are enterprises and businesses, the database is design to recognize  their heirarchy. Each employee to executive have a specific job with the system and the UI is design to monitor effiecincies.
+     Client performs basic function with the software like posting a prost or an eCommerce service, checking emails recipients dashboard,initiating and monitoring campaign and full marketing outreach specifically under the       marketing software category.
+
+     System navigation should be done by strolling, swiping, searching pages, exploring a specific enterprise UI variation.
+
+     *Unfunctional requirements
+        Reliability- System of all products should available 24/7 for users.
+        Scalability- The starting scalable requirements should be unlimited customer user and a maximum of 300 enterprises (unlimited users for each enterprise).
+        Portability- UI should be portable to all modern devices and the software should be downloadable for majors operating systems like Windows, Mac/IOS, Linux/andriod.
+
+-Product
+     The three main product of the big software plus an AI bot(available to customer through CRM and Clients).
+     These three product are: 1) Marketing Automation and Sales Development 2)Customer Relation Management 3)Network Management
+
+        *Pricing- For Pricing and the business plan, the acquiration of these products of the big software is structure into two forms: Single and Premium
+        For SIngle, the client gets once choose any one of the product of the software to be implemented with their enterprise and for Premium the cllient get to choose any two to be implemented with their enterprise.
+
+        *Fucntions/Purposes- Each of these product are different in the purposes and functions like their names suggest. like Network Management, it has nothing to do with customers, it is build for the company.
+        This is when a company seeks a reliable server and network system, visual management and monitoring for Directors, employees effiecincies and many more.
+        or the other products, their name clearly indicate their purposes.
+
+        *Premium feature- Each of the product of the software should be designed to march their specific function. For the Premium feature, Client users have freedom to switching between products, for instance, a Client have premium feature of Marketing/Sale and Network Management, the client users can access any of those products and switch between them.
+

@@ -1,0 +1,710 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: saas
+      POSTGRES_PASSWORD: saas_pass
+      POSTGRES_DB: saasdb
+    volumes:
+      - pgdata;/var/lib/postgresql/data
+      - ./infra/postgres-init.sql;/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - saas-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak;21.1.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_HEALTH_ENABLED=true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/keycloak/saas-realm.json:/opt/keycloak/data/import/saas-realm.json:ro
+    networks:
+      - saas-net
+
+
+  api:
+    build: ./packages/api
+    ports:
+      - "4000:4000"
+    environment:
+      - PORT=4000
+      - CRM_URL=http://crm:5001
+      - MARKETING_URL=http://marketing:5002
+      - NETWORK_URL=http://network:5003
+    depends_on:
+      - crm
+      - marketing
+      - network
+    networks:
+      - saas-net
+
+  crm:
+    build: ./packages/services/crm-service
+    ports:
+      - "5001:5001"
+    environment:
+      - DATABASE_URL=postgresql://saas:saas_pass@postgres:5432/saasdb
+    depends_on:
+      - postgres
+    networks:
+      - saas-net
+
+  marketing:
+    build: ./packages/services/marketing-service
+    ports:
+      - "5002:5002"
+    networks:
+      - saas-net
+
+  network:
+    build: ./packages/services/network-service
+    ports:
+      - "5003:5003"
+    networks:
+      - saas-net
+
+  agent:
+    build: ./packages/agent
+    environment:
+      - NETWORK_API=http://network:5003
+    networks:
+      - saas-net
+
+  frontend:
+    build: ./packages/frontend
+    ports:
+      - "3000:3000"
+    networks:
+      - saas-net
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+
+networks:
+  saas-net:
+    driver: bridge
+
+infra/keycloak/saas-realm.json
+{
+  "id": "saas-realm",
+  "realm": "saas-realm",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "saas-frontend",
+      "publicClient": true,
+      "redirectUris": ["http://localhost:3000/*","http://host.docker.internal:3000/*"],
+      "webOrigins": ["*"],
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "attributes": { "access.token.lifespan": "300" }
+    },
+    {
+      "clientId": "saas-backend",
+      "publicClient": false,
+      "protocol": "openid-connect",
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false
+    }
+  ],
+  "users": [
+    {
+      "username": "testuser",
+      "email": "testuser@example.com",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "Passw0rd!", "temporary": false }
+      ]
+    }
+  ]
+}
+
+
+infra/postgres-init.sql
+    CREATE TABLE IF NOT EXISTS users (
+  id serial PRIMARY KEY,
+  email varchar(255) UNIQUE NOT NULL,
+  hashed_password varchar(255),
+  role varchar(50) DEFAULT 'user',
+  created_at timestamptz DEFAULT now()
+)
+CREATE TABLE IF NOT EXISTS contacts (
+  id serial PRIMARY KEY,
+  owner_id int REFERENCES users(id),
+  name varchar(255),
+  email varchar(255),
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+  id varchar(128) PRIMARY KEY,
+  name varchar(255),
+  status varchar(32),
+  last_seen timestamptz
+);
+
+packages/api/Dockerfile
+   FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
+COPY src ./src
+EXPOSE 4000
+CMD ["npm","run","start"]
+
+packages/api/package.json
+   {
+  "name":"api-gateway",
+  "version":"0.1.0",
+  "private":true,
+  "scripts":{
+    "start":"ts-node src/index.ts"
+  },
+  "dependencies":{
+    "axios":"^1.4.0",
+    "body-parser":"^1.20.2",
+    "cors":"^2.8.5",
+    "dotenv":"^16.3.1",
+    "express":"^4.18.2"
+    "jose": "^5.0.0"
+  },
+  "devDependencies":{
+    "ts-node":"^10.9.1",
+    "typescript":"^5.2.2",
+    "@types/express":"^4.17.21"
+  }
+}
+
+packages/api/tsconfig.json
+{ 
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir":"dist"
+  }
+}
+
+packages/api/src/index.ts
+import express from "express";
+import bodyParser from "body-parser";
+import cors from "cors";
+import axios from "axios";
+import dotenv from "dotenv";
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+const CRM_URL = process.env.CRM_URL || "http://crm:5001";
+const MARKETING_URL = process.env.MARKETING_URL || "http://marketing:5002";
+const NETWORK_URL = process.env.NETWORK_URL || "http://network:5003";
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+import { expressjwt as jwt } from 'express-jwt';
+import jwksRsa from 'jwks-rsa';
+
+
+const KEYCLOAK_URL = process.env.KEYCLOAK_URL || 'http://keycloak:8080';
+const REALM = process.env.KEYCLOAK_REALM || 'saas-realm';
+
+
+export const jwtMiddleware = jwt({
+secret: jwksRsa.expressJwtSecret({
+cache: true,
+rateLimit: true,
+jwksRequestsPerMinute: 5,
+jwksUri: `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/certs`,
+}),
+audience: 'saas-api',
+issuer: `${KEYCLOAK_URL}/realms/${REALM}`,
+algorithms: ['RS256'],
+});
+
+import { keycloakProtect } from './keycloakAuth';
+
+app.get("/api/crm/contacts", async (_req, res) => {
+  try {
+    const resp = await axios.get(`${CRM_URL}/contacts`);
+    res.json(resp.data);
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post("/api/crm/contacts", async (req, res) => {
+  try {
+    const resp = await axios.post(`${CRM_URL}/contacts`, req.body);
+    res.status(resp.status).json(resp.data);
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post("/api/crm/contacts", keycloakProtect(), async (req, res) => {
+  // req.kauth.token contains validated payload
+  try {
+    const resp = await axios.post(`${CRM_URL}/contacts`, req.body);
+    res.status(resp.status).json(resp.data);
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+
+app.get("/api/marketing/campaigns", async (_req, res) => {
+  try {
+    const resp = await axios.get(`${MARKETING_URL}/campaigns`);
+    res.json(resp.data);
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.get("/api/network/devices", async (_req, res) => {
+  try {
+    const resp = await axios.get(`${NETWORK_URL}/devices`);
+    res.json(resp.data);
+  } catch (err: any) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+const PORT = Number(process.env.PORT || 4000);
+app.listen(PORT, () => console.log(`API Gateway listening on ${PORT}`));
+
+
+
+
+packages/api/src/keycloakAuth.ts
+// packages/api/src/keycloakAuth.ts
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+import fetch from 'node-fetch';
+
+const KEYCLOAK_ISSUER = process.env.KEYCLOAK_ISSUER || 'http://keycloak:8080/realms/saas-realm';
+const JWKS_URL = `${KEYCLOAK_ISSUER}/protocol/openid-connect/certs`;
+
+// Remote JWK Set (jose caches by default)
+const jwks = createRemoteJWKSet(new URL(JWKS_URL));
+
+export async function verifyAccessToken(token: string) {
+  if (!token) throw new Error('No token provided');
+  // token may be "Bearer <token>"
+  const raw = token.startsWith('Bearer ') ? token.slice(7) : token;
+  // verify signature and basic claims (issuer)
+  const { payload } = await jwtVerify(raw, jwks, {
+    issuer: KEYCLOAK_ISSUER
+    // optionally: audience: 'saas-backend' or check 'azp' claim
+  } as any);
+  return payload;
+}
+
+// Express middleware
+export function keycloakProtect() {
+  return async (req: any, res: any, next: any) => {
+    try {
+      const auth = req.headers['authorization'] || '';
+      if (!auth) return res.status(401).json({ error: 'missing_authorization' });
+      const payload = await verifyAccessToken(auth);
+      // attach token payload to request for handlers
+      req.kauth = { token: payload };
+      next();
+    } catch (err: any) {
+      console.error('auth error', err && err.message);
+      return res.status(401).json({ error: 'invalid_token', details: err.message });
+    }
+  };
+}
+
+
+packages/services/crm-service/Dockerfile
+   FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+EXPOSE 5001
+CMD ["node","index.js"]
+
+packages/services/crm-service/package.json
+{
+  "name":"crm-service",
+  "version":"0.1.0",
+  "private":true,
+  "main":"index.js",
+  "dependencies":{
+    "express":"^4.18.2",
+    "pg":"^8.11.0",
+    "dotenv":"^16.3.1"
+  }
+}
+
+packages/services/crm-service/index.js
+require('dotenv').config();
+const express = require('express');
+const { Pool } = require('pg');
+
+const app = express();
+app.use(express.json());
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://saas:saas_pass@localhost:5432/saasdb'
+});
+
+// simple health
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// list contacts
+app.get('/contacts', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT id, owner_id, name, email, created_at FROM contacts ORDER BY id DESC');
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'db error' });
+  }
+});
+
+// create contact
+app.post('/contacts', async (req, res) => {
+  const { owner_id, name, email } = req.body;
+  try {
+    const r = await pool.query(
+      'INSERT INTO contacts(owner_id, name, email) VALUES($1,$2,$3) RETURNING id, owner_id, name, email, created_at',
+      [owner_id || null, name, email]
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'db error' });
+  }
+});
+
+// basic users listing (demo)
+app.get('/users', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT id, email, role, created_at FROM users ORDER BY id DESC');
+    res.json(r.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'db error' });
+  }
+});
+
+const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => console.log(`CRM service on ${PORT}`));
+
+packages/services/marketing-service/Dockerfile
+   FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+EXPOSE 5002
+CMD ["node","index.js"]
+
+packages/services/marketing-service/package.json
+{
+  "name":"marketing-service",
+  "version":"0.1.0",
+  "private":true,
+  "main":"index.js",
+  "dependencies":{
+    "express":"^4.18.2"
+  }
+}
+
+packages/services/marketing-service/index.js
+const express = require('express');
+const app = express();
+app.use(express.json());
+
+const campaigns = [
+  { id:1, name: 'Welcome Series', status: 'active'},
+  { id:2, name: 'Churn Winback', status: 'paused'}
+];
+
+app.get('/campaigns', (_req, res) => res.json(campaigns));
+
+app.post('/campaigns/:id/send', (req, res) => {
+  const { recipients } = req.body;
+  // Mock: pretend to send
+  res.json({ ok: true, sent: (recipients || []).length });
+});
+
+const PORT = process.env.PORT || 5002;
+app.listen(PORT, () => console.log(`Marketing service on ${PORT}`));
+
+packages/services/network-service/Dockerfile
+   FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+EXPOSE 5003
+CMD ["node","index.js"]
+
+packages/services/network-service/package.json
+{
+  "name":"network-service",
+  "version":"0.1.0",
+  "private":true,
+  "main":"index.js",
+  "dependencies":{
+    "express":"^4.18.2"
+  }
+}
+
+packages/services/network-service/index.js
+const express = require('express');
+const app = express();
+app.use(express.json());
+
+let devices = [
+  { id: 'r1', name: 'router-1', status: 'online', lastSeen: new Date().toISOString() },
+  { id: 'ap1', name: 'ap-1', status: 'online', lastSeen: new Date().toISOString() }
+];
+
+app.get('/devices', (_req, res) => res.json(devices));
+
+app.post('/devices/heartbeat', (req, res) => {
+  const { id, name } = req.body;
+  const now = new Date().toISOString();
+  let d = devices.find(x => x.id === id);
+  if (d) {
+    d.lastSeen = now;
+    d.status = 'online';
+  } else {
+    d = { id, name: name || id, status: 'online', lastSeen: now };
+    devices.push(d);
+  }
+  res.json({ ok: true, device: d });
+});
+
+const PORT = process.env.PORT || 5003;
+app.listen(PORT, () => console.log(`Network service on ${PORT}`));
+
+packages/agent/Dockerfile
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+CMD ["node","agent.js"]
+
+packages/agent/package.json
+{
+  "name":"agent",
+  "version":"0.1.0",
+  "private":true,
+  "main":"agent.js",
+  "dependencies":{
+    "axios":"^1.4.0"
+  }
+}
+
+packages/agent/agent.js
+const axios = require('axios');
+const id = process.env.AGENT_ID || `agent-${Math.floor(Math.random()*10000)}`;
+const API = process.env.NETWORK_API || 'http://network:5003';
+
+async function sendHeartbeat(){
+  try {
+    await axios.post(`${API}/devices/heartbeat`, { id, name: `edge-${id}` });
+    console.log('heartbeat sent', id);
+  } catch (err) {
+    console.error('heartbeat error', err.message);
+  }
+}
+
+setInterval(sendHeartbeat, 5000);
+sendHeartbeat();
+
+
+packages/frontend/Dockerfile
+   FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+EXPOSE 3000
+CMD ["npm","run","dev"]
+
+packages/frontend/vite.config.ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+export default defineConfig({
+  plugins:[react()],
+  server:{ host: true, port:3000, proxy: { '/api': 'http://api:4000' } }
+});
+
+
+
+
+    <!-- packages/frontend/silent-check-sso.html -->
+    <html><body>silent</body></html>
+
+
+
+packages/frontend/src/auth/keycloak.ts
+// packages/frontend/src/auth/keycloak.ts
+import Keycloak from 'keycloak-js';
+
+const keycloak = new Keycloak({
+  url: 'http://localhost:8080',
+  realm: 'saas-realm',
+  clientId: 'saas-frontend'
+});
+
+export default keycloak;
+
+packages/frontend/src/setupAxios.ts
+// packages/frontend/src/setupAxios.ts
+import axios from 'axios';
+import keycloak from './auth/keycloak';
+
+axios.interceptors.request.use((cfg) => {
+  const token = keycloak.token;
+  if (token) cfg.headers = { ...cfg.headers, Authorization: `Bearer ${token}` };
+  return cfg;
+});
+
+
+
+
+// packages/frontend/src/main.tsx
+import keycloak from './auth/keycloak';
+
+keycloak.init({ onLoad: 'check-sso', silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html' })
+  .then((authenticated) => {
+    // Optionally redirect to login if not authenticated
+    // if (!authenticated) keycloak.login();
+
+    // attach interceptor to axios to include Access Token in API calls
+    import('./setupAxios').then(() => {
+      const root = createRoot(document.getElementById('root')!);
+      root.render(<App />);
+    });
+  })
+  .catch(e => {
+    console.error('Keycloak init failed', e);
+    const root = createRoot(document.getElementById('root')!);
+    root.render(<App />);
+  });
+
+
+
+packages/frontend/src/pages/Home.tsx
+import React from "react";
+export default function Home(){
+  return <div style={{padding:20}}>
+    <h1>Unified SaaS Dashboard</h1>
+    <p>Modules: Network Management, CRM, Marketing</p>
+  </div>;
+  import React, { useState, useEffect } from "react";
+import keycloak from "../auth/keycloak";
+
+export default function Home(){
+  const [, setTick] = useState(0);
+  useEffect(()=>{
+    const t = setInterval(()=> setTick(n => n+1), 1000);
+    return ()=>clearInterval(t);
+  },[]);
+  return <div style={{padding:20}}>
+    <h1>Unified SaaS Dashboard</h1>
+    <p>Logged in: {String(keycloak.authenticated)}</p>
+    <button onClick={() => keycloak.login()}>Login</button>
+    <button onClick={() => keycloak.logout({ redirectUri: window.location.origin })}>Logout</button>
+    <p>Access token expires at: {keycloak.tokenParsed ? JSON.stringify(keycloak.tokenParsed.exp) : 'n/a'}</p>
+  </div>;
+}
+
+}
+
+
+packages/frontend/src/pages/CRM.tsx
+import React, {useEffect, useState} from "react";
+import axios from "axios";
+
+export default function CRM(){
+  const [contacts, setContacts] = useState<any[]>([]);
+  useEffect(()=>{ axios.get('/api/crm/contacts').then(r=>setContacts(r.data)).catch(()=>{}); },[]);
+  return <div style={{padding:20}}>
+    <h2>Contacts</h2>
+    <ul>{contacts.map(c=> <li key={c.id}>{c.name} — {c.email}</li>)}</ul>
+  </div>;
+}
+
+packages/frontend/src/pages/Network.tsx
+import React, {useEffect, useState} from "react";
+import axios from "axios";
+export default function Network(){
+  const [devices, setDevices] = useState<any[]>([]);
+  useEffect(()=>{ axios.get('/api/network/devices').then(r=>setDevices(r.data)).catch(()=>{}); },[]);
+  return <div style={{padding:20}}>
+    <h2>Network Devices</h2>
+    <table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Last Seen</th></tr></thead>
+      <tbody>{devices.map(d=> <tr key={d.id}><td>{d.id}</td><td>{d.name}</td><td>{d.status}</td><td>{new Date(d.lastSeen).toLocaleString()}</td></tr>)}</tbody>
+    </table>
+  </div>;
+}
+
+packages/frontend/src/pages/Marketing.tsx
+import React,{useEffect,useState} from "react";
+import axios from "axios";
+export default function Marketing(){
+  const [camps, setCamps] = useState<any>([]);
+  useEffect(()=>{ axios.get('/api/marketing/campaigns').then(r=>setCamps(r.data)).catch(()=>{}); },[]);
+  return <div style={{padding:20}}>
+    <h2>Campaigns</h2>
+    <ul>{camps.map(c=> <li key={c.id}>{c.name} — {c.status}</li>)}</ul>
+  </div>;
+}
+
+
+
+packages/frontend/index.html
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>SaaS App</title></head>
+  <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
+</html>
+
+packages/frontend/package.json
+{
+  "name":"saas-frontend",
+  "version":"0.1.0",
+  "private":true,
+  "scripts":{
+    "dev":"vite --host"
+  },
+  "dependencies":{
+    "react":"^18.2.0",
+    "react-dom":"^18.2.0",
+    "react-router-dom":"^6.16.0",
+    "axios":"^1.4.0"
+    "keycloak-js": "^20.0.0"
+  },
+  "devDependencies":{
+    "vite":"^5.0.0",
+    "typescript":"^5.2.2",
+    "@types/react":"^18.2.25",
+    "@types/react-dom":"^18.2.7"
+  }
+}
+
+
